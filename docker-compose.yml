@@ -1,0 +1,49 @@
+services:
+  db:
+    image: mysql:8.0
+    container_name: ticket-db
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: ticketdb
+      MYSQL_USER: ticket_user
+      MYSQL_PASSWORD: ticket_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - dbdata:/var/lib/mysql
+    restart: always
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: ticket-pma
+    links:
+      - db
+    environment:
+      PMA_HOST: db
+      PMA_PORT: 3306
+      PMA_USER: root
+      PMA_PASSWORD: root
+    restart: always
+    ports:
+      - 8181:80
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ticket-management-app
+    depends_on:
+      - db
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      DATABASE_URL: jdbc:mysql://db:3306/ticketdb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Europe/Paris
+      DB_USERNAME: ticket_user
+      DB_PASSWORD: ticket_password
+      JWT_SECRET: mySecretKey123456789012345678901234567890123456789012345678901234567890
+      JWT_EXPIRATION: 86400
+    ports:
+      - "8080:8080"
+    restart: always
+
+volumes:
+    dbdata:

@@ -1,0 +1,283 @@
+name: CI/CD Pipeline - Ticket Management
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  JAVA_VERSION: '17'
+  MAVEN_OPTS: '-Xmx1024m'
+  DOCKER_IMAGE_NAME: 'ticket-management'
+  DOCKER_REGISTRY: 'ghcr.io'
+
+jobs:
+  # ===============================================
+  # Job de tests et validation du code
+  # ===============================================
+  test:
+    name: Tests et Validation
+    runs-on: ubuntu-latest
+    
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: testdb
+          MYSQL_USER: test_user
+          MYSQL_PASSWORD: test_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=3
+
+    steps:
+      - name: 📁 Checkout du code
+        uses: actions/checkout@v4
+
+      - name: ☕ Configuration Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: maven
+
+      - name: 🔍 Vérification des secrets requis
+        run: |
+          if [ -z "${{ secrets.GITHUB_TOKEN }}" ]; then
+            echo "❌ GITHUB_TOKEN est requis"
+            exit 1
+          fi
+
+      - name: 📋 Cache des dépendances Maven
+        uses: actions/cache@v3
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+
+      - name: 🔨 Compilation du projet
+        run: |
+          echo "🔨 Compilation en cours..."
+          mvn clean compile -B -q
+          echo "✅ Compilation terminée"
+
+      - name: 🧪 Tests unitaires
+        run: |
+          echo "🧪 Exécution des tests unitaires..."
+          mvn test -B -Dspring.profiles.active=test
+          echo "✅ Tests unitaires terminés"
+
+      - name: 🔗 Tests d'intégration
+        run: |
+          echo "🔗 Exécution des tests d'intégration..."
+          mvn verify -B -Dspring.profiles.active=test -DskipUnitTests=true
+          echo "✅ Tests d'intégration terminés"
+        env:
+          DATABASE_URL: jdbc:mysql://localhost:3306/testdb
+          DB_USERNAME: test_user
+          DB_PASSWORD: test_password
+
+      - name: 📊 Génération du rapport de couverture
+        run: |
+          echo "📊 Génération du rapport de couverture..."
+          mvn jacoco:report
+          echo "✅ Rapport de couverture généré"
+
+      - name: 📤 Upload des rapports de test
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: test-reports
+          path: |
+            target/surefire-reports/
+            target/failsafe-reports/
+            target/site/jacoco/
+
+      - name: 💾 Packaging de l'application
+        run: |
+          echo "💾 Packaging en cours..."
+          mvn package -B -DskipTests
+          echo "✅ Packaging terminé"
+
+      - name: 📤 Upload de l'artefact JAR
+        uses: actions/upload-artifact@v3
+        with:
+          name: ticket-management-jar
+          path: target/*.jar
+
+  # ===============================================
+  # Job de construction de l'image Docker
+  # ===============================================
+  build-docker:
+    name: Construction Docker
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    steps:
+      - name: 📁 Checkout du code
+        uses: actions/checkout@v4
+
+      - name: 📦 Configuration Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🔐 Connexion au registre Docker
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🏷️ Extraction des métadonnées
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_REGISTRY }}/${{ github.repository }}/${{ env.DOCKER_IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: 🐳 Construction et publication de l'image Docker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      - name: 📋 Résumé de l'image construite
+        run: |
+          echo "✅ Image Docker construite et publiée"
+          echo "🏷️ Tags: ${{ steps.meta.outputs.tags }}"
+          echo "📦 Registre: ${{ env.DOCKER_REGISTRY }}"
+
+  # ===============================================
+  # Job de validation de sécurité
+  # ===============================================
+  security:
+    name: Analyse de Sécurité
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: 📁 Checkout du code
+        uses: actions/checkout@v4
+
+      - name: ☕ Configuration Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+
+      - name: 🔍 Analyse des vulnérabilités des dépendances
+        run: |
+          echo "🔍 Analyse des vulnérabilités en cours..."
+          mvn org.owasp:dependency-check-maven:check -B
+          echo "✅ Analyse de sécurité terminée"
+
+      - name: 📤 Upload du rapport de sécurité
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: security-report
+          path: target/dependency-check-report.html
+
+  # ===============================================
+  # Job de déploiement (staging/production)
+  # ===============================================
+  deploy:
+    name: Déploiement
+    runs-on: ubuntu-latest
+    needs: [test, build-docker, security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+      - name: 📁 Checkout du code
+        uses: actions/checkout@v4
+
+      - name: 🚀 Simulation du déploiement
+        run: |
+          echo "🚀 Déploiement en cours..."
+          echo "📦 Image: ${{ env.DOCKER_REGISTRY }}/${{ github.repository }}/${{ env.DOCKER_IMAGE_NAME }}:latest"
+          echo "🔧 Configuration de l'environnement de production..."
+          echo "✅ Déploiement simulé avec succès"
+          echo ""
+          echo "📋 Étapes suivantes pour un vrai déploiement :"
+          echo "1. Configurer les secrets de déploiement"
+          echo "2. Ajouter les scripts de déploiement"
+          echo "3. Configurer l'environnement cible"
+
+      - name: 💬 Notification de déploiement
+        run: |
+          echo "🎉 Application déployée avec succès !"
+          echo "🌐 URL: https://votre-domaine.com"
+          echo "📖 Documentation: https://votre-domaine.com/swagger-ui.html"
+
+  # ===============================================
+  # Job de notification des résultats
+  # ===============================================
+  notify:
+    name: Notifications
+    runs-on: ubuntu-latest
+    needs: [test, build-docker, security, deploy]
+    if: always()
+
+    steps:
+      - name: 📊 Résumé des résultats
+        run: |
+          echo "📊 Résumé de l'exécution du pipeline :"
+          echo "🧪 Tests: ${{ needs.test.result }}"
+          echo "🐳 Docker: ${{ needs.build-docker.result }}"
+          echo "🔒 Sécurité: ${{ needs.security.result }}"
+          echo "🚀 Déploiement: ${{ needs.deploy.result }}"
+          
+          if [ "${{ needs.test.result }}" == "success" ] && \
+             [ "${{ needs.build-docker.result }}" == "success" ] && \
+             [ "${{ needs.security.result }}" == "success" ]; then
+            echo "✅ Pipeline exécuté avec succès !"
+          else
+            echo "❌ Certaines étapes du pipeline ont échoué"
+          fi
+
+      - name: 📱 Notification Slack (optionnel)
+        if: false  # Activez en configurant SLACK_WEBHOOK_URL
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: |
+            Pipeline ${{ job.status }} pour ${{ github.repository }}
+            Branche: ${{ github.ref }}
+            Commit: ${{ github.sha }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+# ===============================================
+# Configuration des secrets requis
+# ===============================================
+# 
+# Les secrets suivants doivent être configurés dans GitHub :
+# 
+# Requis :
+# - GITHUB_TOKEN (automatiquement disponible)
+# 
+# Optionnels :
+# - SLACK_WEBHOOK_URL (pour les notifications Slack)
+# - DISCORD_WEBHOOK (pour les notifications Discord)
+# - DOCKER_USERNAME (si utilisation d'un autre registre)
+# - DOCKER_PASSWORD (si utilisation d'un autre registre)
+# 
+# ===============================================
